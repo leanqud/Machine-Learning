@@ -1,0 +1,260 @@
+---
+title: "Pokemon Types"
+author: "PSTAT 131/231"
+output:
+    html_document:
+      toc: true
+      toc_float: true
+      code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      warning = FALSE)
+```
+
+## Homework 5
+
+For this assignment, we will be working with the file `"pokemon.csv"`, found in `/data`. The file is from Kaggle: <https://www.kaggle.com/abcsds/pokemon>.
+
+The [Pokémon](https://www.pokemon.com/us/) franchise encompasses video games, TV shows, movies, books, and a card game. This data set was drawn from the video game series and contains statistics about 721 Pokémon, or "pocket monsters." In Pokémon games, the user plays as a trainer who collects, trades, and battles Pokémon to (a) collect all the Pokémon and (b) become the champion Pokémon trainer.
+
+Each Pokémon has a [primary type](https://bulbapedia.bulbagarden.net/wiki/Type) (some even have secondary types). Based on their type, a Pokémon is strong against some types, and vulnerable to others. (Think rock, paper, scissors.) A Fire-type Pokémon, for example, is vulnerable to Water-type Pokémon, but strong against Grass-type.
+
+![Fig 1. Vulpix, a Fire-type fox Pokémon from Generation 1 (also my favorite Pokémon!) ](images/vulpix.png){width="196"}
+
+The goal of this assignment is to build a statistical learning model that can predict the **primary type** of a Pokémon based on its generation, legendary status, and six battle statistics. *This is an example of a **classification problem**, but these models can also be used for **regression problems***.
+
+Read in the file and familiarize yourself with the variables using `pokemon_codebook.txt`.
+
+### Exercise 1
+
+Install and load the `janitor` package. Use its `clean_names()` function on the Pokémon data, and save the results to work with for the rest of the assignment. What happened to the data? Why do you think `clean_names()` is useful?
+```{r}
+library(janitor)
+library(glmnet)
+library(modeldata)
+library(naniar)
+library(themis)
+library(skimr)
+library(forcats)
+library(tidymodels)
+library(ISLR)
+library(ISLR2)
+library(tidyverse)
+library(caret)
+library(ggthemes)
+library(corrplot)
+library(discrim)
+library(ggplot2)
+library(kknn)
+library(dplyr)
+library(ranger)
+library(kableExtra)
+library(vip)
+tidymodels_prefer()
+
+pokemon_raw <- read_csv('/Users/leenaanqud/Downloads/homework-5/data/Pokemon.csv')
+head(pokemon_raw)
+pokemon_raw %>% clean_names() -> pokemon_raw
+head(pokemon_raw)
+```
+clean_names() is helpful because it converts all the column names into forms that are easier to call and utilize later in R by eliminating capital letters and spaces in the names so we don't run into case sensitivity issues. For example, the column Type 1 was converted to type_1 which is more coder-friendly
+
+### Exercise 2
+
+Using the entire data set, create a bar chart of the outcome variable, `type_1`.
+
+How many classes of the outcome are there? Are there any Pokémon types with very few Pokémon? If so, which ones?
+
+For this assignment, we'll handle the rarer classes by grouping them, or "lumping them," together into an 'other' category. [Using the `forcats` package](https://forcats.tidyverse.org/), determine how to do this, and **lump all the other levels together except for the top 6 most frequent** (which are Bug, Fire, Grass, Normal, Water, and Psychic).
+
+Convert `type_1` and `legendary` to factors.
+```{r}
+ggplot(pokemon_raw, aes(x = type_1)) + geom_bar()
+
+pokemon_raw$type_1 <- fct_lump(pokemon_raw$type_1, n = 6)
+
+pokemon_raw %>% 
+  mutate(generation = as.factor(generation), type_1 = as_factor(type_1), legendary = as.factor(legendary)) -> pokemon
+
+ggplot(pokemon, aes(x = type_1)) + geom_bar() # verifying pct_lump
+```
+There are 18 classes of the outcome variable. The pokemon types with few pokemon are Flying and Fairy.
+
+### Exercise 3
+
+Perform an initial split of the data. Stratify by the outcome variable. You can choose a proportion to use. Verify that your training and test sets have the desired number of observations.
+
+Next, use *v*-fold cross-validation on the training set. Use 5 folds. Stratify the folds by `type_1` as well. *Hint: Look for a `strata` argument.*
+
+Why do you think doing stratified sampling for cross-validation is useful?
+```{r}
+set.seed(27)
+p_split <- initial_split(pokemon, strata=type_1, prop=0.7)
+p_split
+
+p_train <- training(p_split)
+p_test <- testing(p_split)
+
+p_folds <- vfold_cv(p_train, v = 5, strata = type_1)
+```
+Stratified sampling for cross-validation is useful because it creates an even proportion of each of the classes in the folds which works to reduce bias and give us more accurate models and results.
+
+### Exercise 4
+
+Create a correlation matrix of the training set, using the `corrplot` package. *Note: You can choose how to handle the categorical variables for this plot; justify your decision(s).*
+
+What relationships, if any, do you notice?
+```{r}
+p_train %>% select(-name) %>%
+  mutate(type_2 = factor(type_2, levels = c("Poison", "Rock", "Dark", "NA", "Flying", "Water","Dragon", "Electric", "Ground", "Fire", "Fairy", "Ghost", "Grass", "Bug", "Fighting", "Normal", "Psychic", "Steel", "Ice"))) -> p_train_temporary
+
+p_train_temporary %>%
+  mutate_if(is.factor, as.numeric) -> p_train_matrix
+
+p_train_matrix %>% 
+  select(is.numeric) %>% # selecting numeric columns
+  cor(use = "pairwise.complete.obs") %>% # handling missing data in Salary
+  corrplot(type = "lower", diag = FALSE) 
+```
+I dropped the name variable and converted all non-numeric values to numeric to include as much data as possible. The strongest correlation exists between generation and number because number is a unique value. The other correlations include hp, attack, defense, sp_atk, sp_def, and speed correlated with total.
+
+### Exercise 5
+
+Set up a recipe to predict `type_1` with `legendary`, `generation`, `sp_atk`, `attack`, `speed`, `defense`, `hp`, and `sp_def`.
+
+-   Dummy-code `legendary` and `generation`;
+
+-   Center and scale all predictors.
+```{r}
+p_recipe <-
+  recipe(type_1 ~ legendary+generation+sp_atk+attack+speed+defense+hp+sp_def, data = p_train) %>% 
+  step_dummy(legendary, generation) %>% 
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+```
+
+### Exercise 6
+
+We'll be fitting and tuning an elastic net, tuning `penalty` and `mixture` (use `multinom_reg()` with the `glmnet` engine).
+
+Set up this model and workflow. Create a regular grid for `penalty` and `mixture` with 10 levels each; `mixture` should range from 0 to 1. For this assignment, let `penalty` range from 0.01 to 3 (this is on the identity_trans() scale; note that you’ll need to specify these values in base 10 otherwise).
+```{r}
+p_ela <- multinom_reg(mixture = tune(), 
+                    penalty = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("glmnet")
+
+p_ela_wf <- workflow() %>%
+  add_model(p_ela) %>%
+  add_recipe(p_recipe)
+
+p_ela_grid <- grid_regular(penalty(range = c(0.01, 3),
+                                   trans = identity_trans()),
+                                   mixture(range = c(0, 1)),
+                                   levels = 10)
+```
+
+### Exercise 7
+
+Now set up a random forest model and workflow. Use the `ranger` engine and set `importance = "impurity"`; we'll be tuning `mtry`, `trees`, and `min_n`. Using the documentation for `rand_forest()`, explain in your own words what each of these hyperparameters represent.
+
+Create a regular grid with 8 levels each. You can choose plausible ranges for each hyperparameter. Note that `mtry` should not be smaller than 1 or larger than 8. **Explain why neither of those values would make sense.**
+
+What type of model does `mtry = 8` represent?
+```{r}
+p_for <- rand_forest(mtry = tune(), 
+                           trees = tune(), 
+                           min_n = tune()) %>%
+  set_engine("ranger", importance = "impurity") %>% 
+  set_mode("classification")
+
+p_for_wf <- workflow() %>% 
+  add_model(p_for) %>% 
+  add_recipe(p_recipe)
+
+p_for_grid <- grid_regular(mtry(range = c(1, 8)), 
+                        trees(range = c(200, 600)),
+                        min_n(range = c(1, 20)),
+                        levels = 8)
+p_for_grid
+```
+mtry represents the number of predictors to be randomly sampled. trees represents the number of trees in each group. min_n represents the minimum number of nodes required for a split. mtry should not be smaller than 1 or larger than 8 because mtry represents an integer for the number of predictors that will be randomly sampled at each split when creating the tree models, so the value must be within the range of levels. mtry=8 represents a model with 8 predictors that will be randomply sampled at each split.
+
+### Exercise 8
+
+Fit all models to your folded data using `tune_grid()`.
+
+**Note: Tuning your random forest model will take a few minutes to run, anywhere from 5 minutes to 15 minutes and up. Consider running your models outside of the .Rmd, storing the results, and loading them in your .Rmd to minimize time to knit. We'll go over how to do this in lecture.**
+
+Use `autoplot()` on the results. What do you notice? Do larger or smaller values of `penalty` and `mixture` produce better ROC AUC? What about values of `min_n`, `trees`, and `mtry`?
+
+What elastic net model and what random forest model perform the best on your folded data? (What specific values of the hyperparameters resulted in the optimal ROC AUC?)
+```{r}
+# Model 1
+p_ela_tune <- tune_grid(
+  object = p_ela_wf, 
+  resamples = p_folds, 
+  grid = p_ela_grid)
+
+autoplot(p_ela_tune) + theme_minimal()
+
+# Model 2
+p_for_tune <- tune_grid(
+  p_for_wf,
+  resamples = p_folds,
+  grid = p_for_grid
+)
+
+autoplot(p_for_tune) + theme_minimal()
+```
+
+### Exercise 9
+
+Select your optimal [**random forest model**]{.underline}in terms of `roc_auc`. Then fit that model to your training set and evaluate its performance on the testing set.
+
+Using the **training** set:
+
+-   Create a variable importance plot, using `vip()`. *Note that you'll still need to have set `importance = "impurity"` when fitting the model to your entire training set in order for this to work.*
+
+    -   What variables were most useful? Which were least useful? Are these results what you expected, or not?
+
+Using the testing set:
+
+-   Create plots of the different ROC curves, one per level of the outcome variable;
+
+-   Make a heat map of the confusion matrix.
+```{r}
+# Selecting Optimal Model
+show_best(p_for_tune, n = 1)
+best_p_for <- select_best(p_for_tune)
+
+# Training Set
+final_p_for <- finalize_workflow(p_for_wf, best_p_for)
+final_p_for <- fit(final_p_for, p_train)
+
+final_p_for %>% extract_fit_parsnip() %>% 
+  vip() +
+  theme_minimal()
+
+# Testing Set
+final_p_for_test <- augment(final_p_for, p_test) %>% 
+  select(type_1, starts_with(".pred"))
+
+roc_auc(final_p_for_test, truth = type_1, .pred_Bug:.pred_Other)
+
+roc_curve(final_p_for_test, truth = type_1, .pred_Bug:.pred_Other) %>% 
+  autoplot()
+
+conf_mat(final_p_for_test, truth = type_1, .pred_class) %>% 
+  autoplot(type = "heatmap")
+```
+Sp_atk and attack were most useful. The generations were least important, which was to be expected as it's only major correlation was with number.
+
+### Exercise 10
+
+How did your best random forest model do on the testing set?
+
+Which Pokemon types is the model best at predicting, and which is it worst at? (Do you have any ideas why this might be?)
+The model did not do as good on the testing set, with a roc_auc of .6876. The model is best at predicting the 'Other' category of pokemon types, and worst at predicting Normal and Psychic. The model may be best at predicting the 'Other' category because there were more variables that fell into that category.

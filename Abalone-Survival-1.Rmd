@@ -1,0 +1,185 @@
+---
+title: "Abalone Survival"
+author: "PSTAT 131/231"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      warning = FALSE)
+```
+
+## Linear Regression and KNN
+
+For this assignment, we will be working with a data set from the UCI (University of California, Irvine) Machine Learning repository ([see website here](http://archive.ics.uci.edu/ml/datasets/Abalone)). The full data set consists of $4,177$ observations of abalone in Tasmania. (Fun fact: [Tasmania](https://en.wikipedia.org/wiki/Tasmania "Tasmania") supplies about $25\%$ of the yearly world abalone harvest.)
+
+![*Fig 1. Inside of an abalone shell.*](images/17612037-abalone-shell-inside.jpg){width="309"}
+
+The age of an abalone is typically determined by cutting the shell open and counting the number of rings with a microscope. The purpose of this data set is to determine whether abalone age (**number of rings + 1.5**) can be accurately predicted using other, easier-to-obtain information about the abalone.
+
+The full abalone data set is located in the `\data` subdirectory. Read it into *R* using `read_csv()`. Take a moment to read through the codebook (`abalone_codebook.txt`) and familiarize yourself with the variable definitions.
+
+Make sure you load the `tidyverse` and `tidymodels`!
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(ggplot2)
+library(corrplot)
+library(ggthemes)
+library(kknn)
+library(kableExtra)
+tidymodels_prefer()
+
+abalone_data <- read_csv('/Users/leenaanqud/Downloads/homework-2/data/abalone.csv')
+head(abalone_data)
+```
+
+### Question 1
+Your goal is to predict abalone age, which is calculated as the number of rings plus 1.5. Notice there currently is no `age` variable in the data set. Add `age` to the data set.
+```{r}
+abalone_data <- abalone_data %>%
+  mutate(age=rings+1.5) %>%
+  mutate(rings=NULL) # removes rings from the data set, as it's not a valid variable for prediction of age
+  
+head(abalone_data)
+```
+
+Assess and describe the distribution of `age`.
+```{r}
+ggplot(data=abalone_data, aes(x=age))+geom_histogram()
+qqplot
+```
+\
+Based on the histogram, we can assume the data is reasonably normally distributed with a slight skew to the right.\
+
+### Question 2
+Split the abalone data into a training set and a testing set. Use stratified sampling. You should decide on appropriate percentages for splitting the data.
+*Remember that you'll need to set a seed at the beginning of the document to reproduce your results.*
+```{r}
+set.seed(1119)
+
+abd_split <- initial_split(data=abalone_data, prop=0.8, strata=age)
+abd_train <- training(abd_split)
+abd_test <- testing(abd_split)
+```
+
+### Question 3
+Using the **training** data, create a recipe predicting the outcome variable, `age`, with all other predictor variables. Note that you **should not** include `rings` to predict `age`. *Explain why you shouldn't use `rings` to predict `age`.*
+
+Steps for your recipe:
+1.  dummy code any categorical predictors
+2.  create interactions between
+    -   `type` and `shucked_weight`,
+    -   `longest_shell` and `diameter`,
+    -   `shucked_weight` and `shell_weight`
+3.  center all predictors, and
+4.  scale all predictors.
+You'll need to investigate the `tidymodels` documentation to find the appropriate step functions to use.
+```{r}
+abd_recipe <-
+  recipe(age ~ ., data = abd_train) %>% # predicting outcome variable 'age' w all other predictor variables
+  step_dummy(all_nominal_predictors()) %>% # dummy code for categorical predictors
+  step_interact(terms=~starts_with('type'):shucked_weight) %>%
+  step_interact(terms=~longest_shell:diameter) %>%
+  step_interact(terms=~shucked_weight:shell_weight) %>% # interactions between variables
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+
+prep(abd_recipe) %>% 
+  bake(new_data = abd_train) %>% 
+  head() %>% 
+  kable() %>% 
+  kable_styling(full_width = F) %>% 
+  scroll_box(width = "100%", height = "200px")
+```
+\
+We should not use `rings` to predict `age` because the two variables are already correlated with each other in a constant way, ie they are not linearly related.\
+
+### Question 4
+Create and store a linear regression object using the `"lm"` engine.
+```{r}
+abd_lm <- linear_reg() %>% 
+  set_engine("lm")
+```
+
+### Question 5
+Create and store a KNN object using the `"kknn"` engine. Specify `k = 7`.
+```{r}
+abd_kkn <- nearest_neighbor(neighbors=7) %>% 
+  set_engine("kknn") %>% 
+  set_mode("regression")
+```
+
+### Question 6
+Now, for each of these models (linear regression and KNN):
+1.  set up an empty workflow,
+2.  add the model, and
+3.  add the recipe that you created in Question 3.
+
+Note that you should be setting up two separate workflows.
+Fit both models to the training set.
+```{r}
+# Linear Regression Model
+lm_wflow <- workflow() %>% 
+  add_model(abd_lm) %>% 
+  add_recipe(abd_recipe)
+
+# KNN Model
+knn_wflow <- workflow() %>% 
+  add_model(abd_kkn) %>% 
+  add_recipe(abd_recipe)
+```
+
+### Question 7
+Use your linear regression `fit()` object to predict the age of a hypothetical female abalone with longest_shell = 0.50, diameter = 0.10, height = 0.30, whole_weight = 4, shucked_weight = 1, viscera_weight = 2, and shell_weight = 1.
+```{r}
+lm_fit <- fit(lm_wflow, abd_train)
+
+abalone_ex <- tibble(type='F',
+                    longest_shell=0.5,
+                    diameter=.1,
+                    height=.3,
+                    whole_weight=4,
+                    shucked_weight=1,
+                    viscera_weight=2,
+                    shell_weight=1)
+
+abalone_ex_res <- predict(lm_fit, new_data = abalone_ex)
+
+abalone_ex_res %>%
+  head()
+```
+
+### Question 8
+Now you want to assess your models' performance. To do this, use the `yardstick` package:
+1.  Create a metric set that includes *R^2^*, RMSE (root mean squared error), and MAE (mean absolute error).
+2.  Use `augment()` to create a tibble of your model's predicted values from the **testing data** along with the actual observed ages (these are needed to assess your model's performance).
+3.  Finally, apply your metric set to the tibble, report the results, and interpret the *R\^2* value.
+Repeat these steps once for the linear regression model and for the KNN model.
+```{r}
+library(yardstick)
+library(parsnip)
+
+# Linear Regression Model
+lm_fit <- fit(lm_wflow, abd_test) # fitting testing data
+met_set = metric_set(rmse, rsq, mae) # metric set
+abd_test_lm = augment(lm_fit, new_data = abd_test) # creates tibble of testing data predicted values
+abd_metrics_lm = met_set(abd_test_lm, truth = age, estimate = .pred) # applies metric set to tibble
+print(abd_metrics_lm)
+
+# KNN Model
+knn_fit <- fit(knn_wflow, abd_test)
+abd_test_knn = augment(knn_fit, new_data = abd_test)
+abd_metrics_knn =  met_set(abd_test_knn, truth = age, estimate = .pred)
+print(abd_metrics_knn)
+```
+
+### Question 9
+Which model performed better on the testing data? Explain why you think this might be. Are you surprised by any of your results? Why or why not?\
+To determine which model performed better on the testing data, we can look at the value of the coefficient of determination, $R^2$, as it measures the goodness of fit of a model. The value given is the proportio of variation in the response that is explained by the linear regression model (Saha Ray, PSTAT126, 2024). Based on this, the KNN model is better fit than the linear regression model, as it has a higher $R^2$ value.\
